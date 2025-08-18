@@ -1,0 +1,5 @@
+{
+  "name": "RondaCheck: Analisador de Relatórios",
+  "description": "Uma aplicação para analisar relatórios de rondas de segurança, identificar não conformidades, visualizar dados e exportar resultados. Cole ou carregue um relatório para começar.",
+  "requestFramePermissions": []
+}
