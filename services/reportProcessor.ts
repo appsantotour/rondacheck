@@ -4,16 +4,21 @@ import { EventType, NonConformityType } from '../types';
 import { KNOWN_GUARDS } from '../constants';
 
 const parseDateTime = (dateStr: string, timeStr: string): Date => {
-    const [day, month, year] = dateStr.split('/').map(Number);
-    const [hours, minutes] = timeStr.split(':').map(Number);
-    // Month is 0-indexed in JavaScript Date
-    return new Date(year, month - 1, day, hours, minutes);
+    // User-specified input format is mm/dd/yyyy.
+    const [month, day, year] = dateStr.split('/').map(Number);
+    const timeParts = timeStr.split(':').map(Number);
+    const hours = timeParts[0] || 0;
+    const minutes = timeParts[1] || 0;
+    const seconds = timeParts[2] || 0; // handle optional seconds
+    // JavaScript's Date month is 0-indexed.
+    return new Date(year, month - 1, day, hours, minutes, seconds);
 };
 
 const parseLog = (text: string): RawEvent[] => {
-    const lines = text.split('\n').filter(line => line.trim() !== '');
+    const lines = text.split('\n').filter(line => line.trim() !== '' && !line.startsWith("Data e Hora"));
     const events: RawEvent[] = [];
-    const lineRegex = /^(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})\s*\|\s*(.*)$/;
+    // Flexible regex to handle formats like "mm/dd/yyyy, HH:MM:SS" or "mm/dd/yyyy HH:MM |"
+    const lineRegex = /^(\d{2}\/\d{2}\/\d{4}),?\s+(\d{2}:\d{2}(?::\d{2})?)\s*(?:\|\s*)?(.*)$/;
 
     lines.forEach((line, index) => {
         const match = line.trim().match(lineRegex);
@@ -86,6 +91,25 @@ export const analyzeRounds = (text: string, settings: Settings): AnalysisResult 
             }
         } else if (event.type === EventType.INICIO_RONDA) {
             if (inRound) {
+                const localEvents = currentRound.filter(e => e.type === EventType.LOCAL);
+                if (localEvents.length < settings.totalLocations) {
+                    const lastLocalEvent = localEvents.length > 0 ? localEvents[localEvents.length - 1] : null;
+                    const details = lastLocalEvent
+                        ? `Ronda anterior interrompida com ${localEvents.length} de ${settings.totalLocations} locais. Último local: #${lastLocalEvent.data?.localNumber}.`
+                        : `Ronda anterior interrompida com ${localEvents.length} de ${settings.totalLocations} locais. Nenhum local foi visitado.`;
+                    
+                    const roundStartDate = currentRound.length > 0 ? currentRound[0].timestamp : event.timestamp;
+
+                    nonConformities.push({
+                        id: `${roundStartDate.toISOString()}-${NonConformityType.RONDA_INCOMPLETA}-${Math.random()}`,
+                        date: roundStartDate,
+                        guard: currentGuard,
+                        type: NonConformityType.RONDA_INCOMPLETA,
+                        details,
+                        roundEvents: [...currentRound],
+                    });
+                }
+                
                 addNonConformity(NonConformityType.INICIOS_MULTIPLOS, event, `Nova ronda iniciada sem a finalização da anterior (iniciada em ${currentRound[0].timestamp.toLocaleTimeString()}).`);
                 currentRound = []; // Reset and start a new round
             }
@@ -115,22 +139,48 @@ export const analyzeRounds = (text: string, settings: Settings): AnalysisResult 
                 // Check interval
                 const intervalMinutes = (event.timestamp.getTime() - lastLocal.timestamp.getTime()) / (1000 * 60);
                 if (intervalMinutes > settings.maxIntervalMinutes) {
-                    const dinnerStartMinutes = parseInt(settings.dinnerStart.split(':')[0]) * 60 + parseInt(settings.dinnerStart.split(':')[1]);
-                    const dinnerEndMinutes = parseInt(settings.dinnerEnd.split(':')[0]) * 60 + parseInt(settings.dinnerEnd.split(':')[1]);
                     const eventTimeMinutes = getTimeInMinutes(event.timestamp);
 
-                    if (eventTimeMinutes >= dinnerStartMinutes && eventTimeMinutes <= dinnerEndMinutes) {
-                       // It's a long break, but within dinner time. Potentially ok.
-                       // For simplicity, we will still flag long intervals, but a more complex rule could be added.
-                       // Let's create a specific non-conformity for long breaks outside dinner time.
-                    } else {
-                       addNonConformity(NonConformityType.INTERVALO_EXCEDIDO, event, `Intervalo de ${intervalMinutes.toFixed(0)} min entre Local ${lastLocal.data.localNumber} e ${event.data.localNumber} (limite: ${settings.maxIntervalMinutes} min).`);
+                    const isDinnerTime = settings.dinnerIntervals.some(interval => {
+                        if (!interval.start || !interval.end) return false;
+                        const dinnerStartMinutes = parseInt(interval.start.split(':')[0]) * 60 + parseInt(interval.start.split(':')[1]);
+                        const dinnerEndMinutes = parseInt(interval.end.split(':')[0]) * 60 + parseInt(interval.end.split(':')[1]);
+
+                        // Handle overnight intervals (e.g., 23:00 to 01:00)
+                        if (dinnerEndMinutes < dinnerStartMinutes) {
+                            return eventTimeMinutes >= dinnerStartMinutes || eventTimeMinutes <= dinnerEndMinutes;
+                        }
+                        
+                        // Handle same-day intervals
+                        return eventTimeMinutes >= dinnerStartMinutes && eventTimeMinutes <= dinnerEndMinutes;
+                    });
+
+                    if (!isDinnerTime) {
+                       addNonConformity(NonConformityType.INTERVALO_EXCEDIDO, event, `Intervalo de ${intervalMinutes.toFixed(0)} min entre Local ${lastLocal.data.localNumber} e ${event.data.localNumber} (limite: ${settings.maxIntervalMinutes} min). Pausa longa fora do horário de janta.`);
                     }
                 }
             }
         } else if (event.type === EventType.DESCARGA_COLETOR) {
             if (inRound) {
                 currentRound.push(event);
+                
+                const localEvents = currentRound.filter(e => e.type === EventType.LOCAL);
+                if (localEvents.length < settings.totalLocations) {
+                    const lastLocalEvent = localEvents.length > 0 ? localEvents[localEvents.length - 1] : null;
+                    const details = lastLocalEvent
+                        ? `Ronda finalizada com ${localEvents.length} de ${settings.totalLocations} locais. Último local: #${lastLocalEvent.data?.localNumber}.`
+                        : `Ronda finalizada com ${localEvents.length} de ${settings.totalLocations} locais. Nenhum local foi visitado.`;
+
+                     nonConformities.push({
+                        id: `${event.timestamp.toISOString()}-${NonConformityType.RONDA_INCOMPLETA}-${Math.random()}`,
+                        date: event.timestamp,
+                        guard: currentGuard,
+                        type: NonConformityType.RONDA_INCOMPLETA,
+                        details,
+                        roundEvents: [...currentRound],
+                    });
+                }
+
                 inRound = false;
                 currentRound = [];
             }
@@ -142,7 +192,26 @@ export const analyzeRounds = (text: string, settings: Settings): AnalysisResult 
     });
 
     if (inRound) {
-        addNonConformity(NonConformityType.DESCARGA_AUSENTE, currentRound[currentRound.length - 1], `A ronda iniciada em ${currentRound[0].timestamp.toLocaleString()} não teve registro de descarga.`);
+        const lastEvent = currentRound[currentRound.length - 1];
+        const localEvents = currentRound.filter(e => e.type === EventType.LOCAL);
+
+        if (localEvents.length < settings.totalLocations) {
+             const lastLocalEvent = localEvents.length > 0 ? localEvents[localEvents.length - 1] : null;
+             const details = lastLocalEvent
+                ? `Ronda não finalizada, com ${localEvents.length} de ${settings.totalLocations} locais. Último local: #${lastLocalEvent.data?.localNumber}.`
+                : `Ronda não finalizada com ${localEvents.length} de ${settings.totalLocations} locais. Nenhum local foi visitado.`;
+             
+             nonConformities.push({
+                id: `${lastEvent.timestamp.toISOString()}-${NonConformityType.RONDA_INCOMPLETA}-${Math.random()}`,
+                date: lastEvent.timestamp,
+                guard: currentGuard,
+                type: NonConformityType.RONDA_INCOMPLETA,
+                details,
+                roundEvents: [...currentRound],
+            });
+        }
+
+        addNonConformity(NonConformityType.DESCARGA_AUSENTE, lastEvent, `A ronda iniciada em ${currentRound[0].timestamp.toLocaleString('pt-BR')} não teve registro de descarga.`);
     }
 
     // Chart data generation

@@ -1,10 +1,10 @@
 
 export interface Settings {
     maxIntervalMinutes: number;
-    dinnerStart: string;
-    dinnerEnd: string;
+    dinnerIntervals: { start: string; end: string }[];
     roundStartToleranceMinutes: number;
     roundEndToleranceMinutes: number;
+    totalLocations: number;
 }
 
 export interface RawEvent {
@@ -36,6 +36,7 @@ export enum NonConformityType {
     DESCARGA_AUSENTE = "Descarga de coletor ausente",
     INICIOS_MULTIPLOS = "Múltiplos inícios de ronda",
     JANTA_FORA_HORARIO = "Pausa longa fora do horário de janta",
+    RONDA_INCOMPLETA = "Ronda incompleta",
     // Future rules can be added here
 }
 
